@@ -1,5 +1,7 @@
 import { next as A } from "@automerge/automerge"
 import { MessageChannelNetworkAdapter } from "../../automerge-repo-network-messagechannel/src/index.js"
+import { NodeFSStorageAdapter } from "../../automerge-repo-storage-nodefs/src/index.js"
+
 import assert from "assert"
 import * as Uuid from "uuid"
 import { describe, expect, it } from "vitest"
@@ -496,7 +498,8 @@ describe("Repo", () => {
       })
 
       const bob = "bob" as PeerId
-      const bobStorage = new DummyStorageAdapter()
+      //const bobStorage = new DummyStorageAdapter()
+      const bobStorage = new NodeFSStorageAdapter('bob')
       const bobRepo = new Repo({
         storage: bobStorage,
         network: [
@@ -508,7 +511,8 @@ describe("Repo", () => {
       })
 
       const charlie = "charlie" as PeerId
-      const charlieStorage = new DummyStorageAdapter()
+      //const charlieStorage = new DummyStorageAdapter()
+      const charlieStorage = new NodeFSStorageAdapter('charlie')
       const charlieRepo = new Repo({
         storage: charlieStorage,
         network: [new MessageChannelNetworkAdapter(cb)],
@@ -1011,6 +1015,75 @@ describe("Repo", () => {
 
       assert.deepStrictEqual(bobRepo.peers, ["alice", "charlie"])
       assert.deepStrictEqual(charlieRepo.peers, ["bob"])
+
+      teardown()
+    })
+
+    it("charlie can get a document while bob is creating documents", async () => {
+      const { bobRepo, charlieRepo, teardown } = await setup()
+      
+      const docsToCreate = 20;
+      const sharedDocUrls = [];
+
+      let startPromise: Promise<void>;
+      
+      // Let Bob Create documents
+      async function bobCreate(): Promise<void> {
+
+        await startPromise;
+        console.log(`Bob starting creating docs at: ${Date.now()}`);
+        for (const docIdx of Array(docsToCreate).keys()) {
+      
+          // Create a new doc and wait for it to be ready
+          const docHandle = bobRepo.create();
+          await docHandle.whenReady();
+          
+          docHandle.change(doc => {
+            doc.key = docIdx.toString();
+            doc.value = docIdx;
+          });
+        
+          // Share the URL      
+          sharedDocUrls.push(docHandle.url);
+
+          // We some async to allow Charlie to run in parallel
+          await pause(0);
+        }
+        console.log(`Bob finished created docs at: ${Date.now()}`);
+      }
+      
+      // Let Charlie Open/Read documents
+      async function charlieRead(): Promise<void> {
+      
+        // Wait for Bob to start creating documents
+        await startPromise;
+        await pause(3);
+        console.log(`Charlie started reading docs at ${Date.now()}`);
+      
+        let processedUrls = 0;
+        while(sharedDocUrls.length > 0) {
+
+          // We need some async to allow Bob and Charlie to run in parallel
+          await pause(0);
+          const newUrl = sharedDocUrls.shift();
+          const docHandle = charlieRepo.find(newUrl);
+          
+          await docHandle.whenReady();
+          
+          // Assert that we got the correct thing
+          const docValue = await docHandle.doc();
+          assert.deepStrictEqual(docValue, { key: processedUrls.toString(), value: processedUrls });
+          
+          processedUrls += 1;
+          
+        }
+        console.log(`Charlie finished reading ${processedUrls} docs at ${Date.now()}`);
+      }
+
+      // Start Bob producing and Charlie consuming
+      startPromise = pause(20);
+      bobCreate();
+      await charlieRead();
 
       teardown()
     })
